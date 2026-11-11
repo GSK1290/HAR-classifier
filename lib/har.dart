@@ -66,13 +66,20 @@ class SampleWindow {
   // Number of samples the model looks at in one go (50 for the dummy model)
   final int length;
   // Number of new samples between two classifications (25 for the dummy model)
-  final int step;
+  // Not final: the "faster updates" setting halves it at run time. The step
+  // only controls how often the model runs, not what it sees, so changing it
+  // needs no retraining.
+  int step;
   // The buffered samples, oldest first. Each entry is [x, y, z] in g.
   final List<List<double>> _samples = [];
   // Samples added since the last time a window was reported ready
   int _sinceLast = 0;
 
   SampleWindow(this.length, this.step);
+
+  // Number of samples currently buffered (at most `length`). Used to show how
+  // far the first window has filled before the first prediction.
+  int get count => _samples.length;
 
   // Add one sample. Returns true when a new window is ready to classify,
   // in which case the caller should read `batch` straight away.
@@ -131,7 +138,32 @@ class HarClassifier {
 
   // Private constructor: a HarClassifier can only be made through load(),
   // because loading the model and metadata is asynchronous
-  HarClassifier._(this._interpreter, this.classes, this.window);
+  // The step given in the metadata file, before any "faster updates" change
+  final int defaultStep;
+
+  // How long the most recent call to the model took, in milliseconds. Shown
+  // on the Test tab's performance panel.
+  double lastInferenceMs = 0;
+
+  HarClassifier._(this._interpreter, this.classes, this.window)
+      : defaultStep = window.step;
+
+  // The RESpeck streams accelerometer samples at 12.5 Hz
+  static const double sampleRateHz = 12.5;
+
+  // Seconds of data in one window (4 s activity, 10 s social)
+  double get windowSeconds => window.length / sampleRateHz;
+
+  // Seconds between two predictions (2 s, or 1 s with faster updates)
+  double get stepSeconds => window.step / sampleRateHz;
+
+  // How full the window is, from 0 to 1. Reaches 1 at the first prediction.
+  double get warmup => window.count / window.length;
+
+  // Faster updates run the model twice as often (every 1 s instead of 2 s)
+  void setFastUpdates(bool fast) {
+    window.step = fast ? (defaultStep / 2).round() : defaultStep;
+  }
 
   // Load the metadata and the model from the app's assets. Throws if either
   // file is missing or invalid, which main() catches so that the app still
@@ -169,7 +201,9 @@ class HarClassifier {
     // isolate, which is fine for a model as small as the dummy one, but a much
     // bigger model may need to run in a background isolate to keep the UI
     // smooth.
+    final timer = Stopwatch()..start();
     _interpreter.run(window.batch, output);
+    lastInferenceMs = timer.elapsedMicroseconds / 1000.0;
     final probs = output[0];
     // Pick the class with the highest probability (argmax)
     int best = 0;
@@ -186,7 +220,7 @@ class HarClassifier {
 }
 
 // The single classifier used by the app, shared by main.dart (which loads it),
-// ble.dart (which feeds it samples) and home.dart (which checks it exists).
+// ble.dart (which feeds it samples) and the Live tab (which checks it exists).
 // Null until main() has loaded the model, and stays null if loading failed,
 // in which case the app works as before without live HAR.
 HarClassifier? harClassifier;

@@ -75,6 +75,9 @@ flutter:
     - assets/models/social_hybrid.tflite
     - assets/models/social_hybrid_meta.json
     - assets/models/social_hybrid_example.json
+    # Recorded sessions replayed through the classifiers on the Test tab, for
+    # activities that are hard to demonstrate live (see lib/replay.dart)
+    - assets/demo/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
