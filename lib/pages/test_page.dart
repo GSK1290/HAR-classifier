@@ -425,7 +425,7 @@ class _TestPageState extends State<TestPage> {
           title: Text(r.name),
           subtitle: Text(info.kind == ClassKind.activity
               ? 'Activity recording'
-              : 'Social signal recording (sitting still)'),
+              : 'Social signal recording'),
           trailing: IconButton.filledTonal(
             tooltip: playing ? 'Stop' : 'Play',
             icon: Icon(playing ? Icons.stop : Icons.play_arrow),
