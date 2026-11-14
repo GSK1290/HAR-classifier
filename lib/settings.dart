@@ -4,6 +4,7 @@ import 'globals.dart';
 import 'har.dart';
 import 'history.dart';
 import 'labels.dart';
+import 'live.dart';
 import 'pages/data_collection_page.dart';
 import 'pages/onboarding_page.dart';
 import 'scanning.dart';
@@ -57,6 +58,21 @@ class SettingsPage extends StatelessWidget {
               value: appSettings.smoothing,
               onChanged: appSettings.setSmoothing,
             ),
+            // A choice only appears for a task with more than one model
+            if (activityModels.length > 1)
+              _ModelTile(
+                  kind: ClassKind.activity,
+                  icon: Icons.directions_walk,
+                  title: 'Activity model',
+                  options: activityModels,
+                  selected: appSettings.activityModelId),
+            if (socialModels.length > 1)
+              _ModelTile(
+                  kind: ClassKind.social,
+                  icon: Icons.air,
+                  title: 'Breathing & social model',
+                  options: socialModels,
+                  selected: appSettings.socialModelId),
             ListTile(
               leading: const Icon(Icons.model_training),
               title: const Text('About the models'),
@@ -171,6 +187,7 @@ class SettingsPage extends StatelessWidget {
           if (c == null)
             const Text('Not loaded')
           else ...[
+            InfoRow('Model', c.model.name),
             InfoRow('Window', '${c.windowSeconds.toStringAsFixed(0)} s '
                 '(${c.window.length} samples)'),
             InfoRow('Update every', '${c.stepSeconds.toStringAsFixed(1)} s'),
@@ -222,6 +239,65 @@ class SettingsPage extends StatelessWidget {
               child: const Text('Close')),
         ],
       ),
+    );
+  }
+}
+
+// Choose which model runs for one task. Switching loads the new model while
+// the current one keeps running, so the dropdown is disabled until it is
+// done; if loading fails the current model stays in use.
+class _ModelTile extends StatefulWidget {
+  final ClassKind kind;
+  final IconData icon;
+  final String title;
+  final List<ModelOption> options;
+  final String selected;
+  const _ModelTile(
+      {required this.kind,
+      required this.icon,
+      required this.title,
+      required this.options,
+      required this.selected});
+
+  @override
+  State<_ModelTile> createState() => _ModelTileState();
+}
+
+class _ModelTileState extends State<_ModelTile> {
+  bool _loading = false;
+
+  Future<void> _switch(String id) async {
+    if (id == widget.selected) return;
+    final option = findModel(widget.options, id);
+    setState(() => _loading = true);
+    final ok = await live.switchModel(widget.kind, option);
+    if (!mounted) return;
+    setState(() => _loading = false);
+    if (!ok) showToast("Could not load the ${option.name} model");
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(widget.icon),
+      title: Text(widget.title),
+      subtitle: const Text('Restarts this result with a fresh window.'),
+      trailing: _loading
+          ? const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2))
+          : DropdownButton<String>(
+              value: widget.selected,
+              underline: const SizedBox.shrink(),
+              items: [
+                for (final m in widget.options)
+                  DropdownMenuItem(value: m.id, child: Text(m.name)),
+              ],
+              onChanged: (v) {
+                if (v != null) _switch(v);
+              },
+            ),
     );
   }
 }

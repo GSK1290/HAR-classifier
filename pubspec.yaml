@@ -65,9 +65,10 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # Live activity recognition model and its metadata (see lib/har.dart).
-  # Files must be listed here to be packaged into the app. To use a different
-  # model, replace these files and update the paths here and in har.dart.
+  # Activity and social signal models and their metadata (see lib/har.dart).
+  # Files must be listed here to be packaged into the app. To add a model,
+  # list its files here and add it to activityModels / socialModels in
+  # har.dart; it then appears as a choice in Settings.
   assets:
     - assets/models/har_hybrid.tflite
     - assets/models/har_hybrid_meta.json
@@ -75,6 +76,12 @@ flutter:
     - assets/models/social_hybrid.tflite
     - assets/models/social_hybrid_meta.json
     - assets/models/social_hybrid_example.json
+    - assets/models/social_minirocket.tflite
+    - assets/models/social_minirocket_meta.json
+    - assets/models/social_minirocket_example.json
+    - assets/models/social_bilstm.tflite
+    - assets/models/social_bilstm_meta.json
+    - assets/models/social_bilstm_example.json
     # Recorded sessions replayed through the classifiers on the Test tab, for
     # activities that are hard to demonstrate live (see lib/replay.dart)
     - assets/demo/

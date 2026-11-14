@@ -397,6 +397,53 @@ class LiveSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---- Model selection ----
+
+  // Switch the activity or social signal classifier to another model. The
+  // new model is loaded first, so the current one keeps running meanwhile and
+  // stays in use if loading fails. Returns true on success, in which case the
+  // choice is saved in the settings.
+  //
+  // Only that task's buffered samples and results are dropped: the new model
+  // starts from an empty window, and showing or smoothing with results from
+  // the old model would mix two models in one label.
+  Future<bool> switchModel(ClassKind kind, ModelOption option) async {
+    final HarClassifier next;
+    try {
+      next = await HarClassifier.load(option);
+    } catch (e) {
+      print("Could not load model ${option.name}: $e");
+      return false;
+    }
+    next.setFastUpdates(appSettings.fastUpdates);
+
+    // Swap in one synchronous step: samples are fed on this same isolate, so
+    // no window can be half fed to the old model and half to the new one
+    final HarClassifier? old;
+    if (kind == ClassKind.activity) {
+      old = harClassifier;
+      harClassifier = next;
+      _harRecent.clear();
+      activity = null;
+      activitySince = null;
+      // The stationary gate depends on the activity result, so the social
+      // signal also has to wait for a fresh, fully stationary window
+      stationarySince = null;
+      recent.clear();
+    } else {
+      old = socialClassifier;
+      socialClassifier = next;
+      _socialRecent.clear();
+      social = null;
+      socialSince = null;
+    }
+    old?.close();
+
+    appSettings.setModelId(kind, option.id);
+    notifyListeners();
+    return true;
+  }
+
   // Forget all buffered data and results, so the next window starts clean
   void _resetPipeline() {
     harClassifier?.reset();

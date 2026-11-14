@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'globals.dart';
 import 'har.dart';
+import 'labels.dart';
 
 // User preferences, stored in shared preferences so they survive restarts.
 // Widgets listen to `appSettings` and rebuild when a value changes.
@@ -15,6 +16,10 @@ class AppSettings extends ChangeNotifier {
   int inactivityMinutes = 60;
   // True once the first-launch guide has been completed
   bool onboardingDone = false;
+  // Chosen model per task (ModelOption ids, see har.dart). Only saved once
+  // the model has loaded successfully, see LiveSession.switchModel().
+  String activityModelId = activityModels.first.id;
+  String socialModelId = socialModels.first.id;
 
   Future<void> load() async {
     try {
@@ -25,6 +30,12 @@ class AppSettings extends ChangeNotifier {
       fastUpdates = await asyncPrefs.getBool('fastUpdates') ?? false;
       inactivityMinutes = await asyncPrefs.getInt('inactivityMinutes') ?? 60;
       onboardingDone = await asyncPrefs.getBool('onboardingDone') ?? false;
+      activityModelId = findModel(
+              activityModels, await asyncPrefs.getString('activityModel'))
+          .id;
+      socialModelId =
+          findModel(socialModels, await asyncPrefs.getString('socialModel'))
+              .id;
     } catch (e) {
       // Defaults are fine if the preferences cannot be read
       print("Could not read settings: $e");
@@ -54,6 +65,18 @@ class AppSettings extends ChangeNotifier {
   void applyUpdateRate() {
     harClassifier?.setFastUpdates(fastUpdates);
     socialClassifier?.setFastUpdates(fastUpdates);
+  }
+
+  // Remember which model is in use for a task
+  void setModelId(ClassKind kind, String id) {
+    if (kind == ClassKind.activity) {
+      activityModelId = id;
+      asyncPrefs.setString('activityModel', id);
+    } else {
+      socialModelId = id;
+      asyncPrefs.setString('socialModel', id);
+    }
+    notifyListeners();
   }
 
   void setInactivityMinutes(int minutes) {

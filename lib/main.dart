@@ -61,36 +61,37 @@ void main() async {
   }
   print("storageFolder:${storageFolder?.path}");
 
-  // Load the activity recognition model and its metadata from the app's
-  // assets (see har.dart). This is done once at startup, before the UI is
-  // built, so that the classifier is ready as soon as data arrives. If the
-  // model cannot be loaded, harClassifier stays null: the error is logged, the
-  // Live tab shows "model not available", and recording still works.
-  try {
-    harClassifier = await HarClassifier.load();
-  } catch (e) {
-    print("Could not load HAR model: $e");
-  }
-
-  // Load the social signal model the same way. A failure here only disables
-  // the social signal card; activity recognition keeps working.
-  try {
-    socialClassifier = await HarClassifier.load(
-      modelAsset: socialModelAsset,
-      metaAsset: socialMetaAsset,
-    );
-  } catch (e) {
-    print("Could not load social signal model: $e");
-  }
-
-  // User preferences (theme, smoothing, update rate...), stored results and
-  // saved accuracy trials
+  // User preferences (theme, smoothing, update rate, chosen models...). Read
+  // before the models, because they say which models to load.
   await appSettings.load();
+
+  // Load the chosen activity and social signal models (see har.dart). This is
+  // done once at startup, before the UI is built, so that the classifiers are
+  // ready as soon as data arrives. If a model cannot be loaded, its classifier
+  // stays null: the error is logged, the Live tab shows "model not available"
+  // for that task, and everything else (including recording) still works.
+  harClassifier = await _loadModel(activityModels, appSettings.activityModelId);
+  socialClassifier = await _loadModel(socialModels, appSettings.socialModelId);
   appSettings.applyUpdateRate();
+
+  // Stored results and saved accuracy trials
   await history.init();
   await testSession.init();
 
   runApp(const MyApp());
+}
+
+// Load the saved model choice for a task, falling back to the task's default
+// model if that fails (e.g. a model file was removed in a later version)
+Future<HarClassifier?> _loadModel(List<ModelOption> options, String id) async {
+  for (final m in {findModel(options, id), options.first}) {
+    try {
+      return await HarClassifier.load(m);
+    } catch (e) {
+      print("Could not load model ${m.name}: $e");
+    }
+  }
+  return null;
 }
 
 class MyApp extends StatelessWidget {

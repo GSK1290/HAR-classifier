@@ -3,6 +3,9 @@
 // To perform an interaction with a widget in your test, use the WidgetTester
 // utility in the flutter_test package.
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:pdiot/main.dart';
@@ -14,6 +17,7 @@ import 'package:pdiot/history.dart';
 import 'package:pdiot/labels.dart';
 import 'package:pdiot/live.dart';
 import 'package:pdiot/replay.dart';
+import 'package:pdiot/settings.dart';
 import 'package:pdiot/trials.dart';
 
 void main() {
@@ -254,6 +258,62 @@ void main() {
       final w = SampleWindow(50, 25);
       w.step = (25 / 2).round();
       expect(w.step, 13);
+    });
+  });
+
+  // The selectable models (see har.dart). A model missing from pubspec.yaml
+  // is not packaged and only fails on the phone, so check that here.
+  group('model selection', () {
+    test('an unknown or missing id falls back to the default model', () {
+      expect(findModel(socialModels, 'minirocket').name, 'MiniRocket');
+      expect(findModel(socialModels, 'removed'), socialModels.first);
+      expect(findModel(socialModels, null), socialModels.first);
+    });
+
+    test('model ids are unique for each task', () {
+      for (final options in [activityModels, socialModels]) {
+        final ids = options.map((m) => m.id).toList();
+        expect(ids.toSet().length, ids.length);
+      }
+    });
+
+    test('every model and metadata file exists and is bundled', () {
+      final pubspec = File('pubspec.yaml').readAsStringSync();
+      for (final m in [...activityModels, ...socialModels]) {
+        for (final asset in [m.modelAsset, m.metaAsset]) {
+          expect(File(asset).existsSync(), isTrue, reason: asset);
+          expect(pubspec.contains('- $asset'), isTrue,
+              reason: '$asset is not listed in pubspec.yaml');
+        }
+      }
+    });
+
+    testWidgets('Settings offers a choice of social signal model',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
+      expect(find.text('Breathing & social model'), findsOneWidget);
+      // Only one activity model, so no choice is offered for it
+      expect(find.text('Activity model'), findsNothing);
+      // The dropdown lists every social model, the default selected
+      await tester.tap(find.text(socialModels.first.name));
+      await tester.pumpAndSettle();
+      for (final m in socialModels) {
+        expect(find.text(m.name), findsWidgets, reason: m.name);
+      }
+    });
+
+    test('metadata class names match the app labels', () {
+      for (final (options, labels) in [
+        (activityModels, activityClasses),
+        (socialModels, socialClasses),
+      ]) {
+        for (final m in options) {
+          final meta = jsonDecode(File(m.metaAsset).readAsStringSync());
+          expect(List<String>.from(meta['output']['classes']).toSet(),
+              {for (final c in labels) c.id},
+              reason: m.metaAsset);
+        }
+      }
     });
   });
 }
