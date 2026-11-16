@@ -3,9 +3,9 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'utils.dart';
-import 'home.dart';
+import 'live.dart';
+import 'recorder.dart';
 import 'globals.dart';
-import 'har.dart';
 
 // This file contains the BLE code to scan for and connect to a respeck sensor.
 // Once connected, we notify the acceleration characteristic and decode the
@@ -14,7 +14,6 @@ import 'har.dart';
 // and the UI is updated with the latest values.
 
 BluetoothDevice? respeck;
-late MyHomePageState ui;
 StreamSubscription<BluetoothConnectionState>? subscription2;
 
 // 0 until a supported respeck has been identified during scanning
@@ -31,8 +30,7 @@ const int sampleBytes = 6;
 // the review, it needs checking against a v5 sensor.
 const int sampleDataOffset = 8;
 
-Future<void> scanForRespeck(MyHomePageState _ui) async {
-  ui = _ui;
+Future<void> scanForRespeck() async {
   // listen to scan results
   // Note: `onScanResults` clears the results between scans. You should use
   //  `scanResults` if you want the current scan results *or* the results from the previous scan.
@@ -168,7 +166,6 @@ Future<void> notify() async {
   // Subscribe to acceleration values
   if (cha != null) {
     final subscription3 = cha.onValueReceived.listen((value) {
-      ui.received_packet = true;
       // onValueReceived is updated:
       //   - anytime read() is called
       //   - anytime a notification arrives (if subscribed)
@@ -220,16 +217,14 @@ Future<void> notify() async {
       int seqNumInPacket = 0;
       int samplesWritten = 0;
       double x = 0, y = 0, z = 0;
-      // The newest activity prediction made while decoding this packet, or
-      // null if no sample in this packet completed a classification window
-      HarPrediction? prediction;
-      // Likewise for the social signal classifier
-      HarPrediction? socialPrediction;
+      // The decoded samples of this packet, passed to the live session
+      // (both classifiers) in one go after the loop
+      final List<List<double>> samples = [];
 
       // Take a single snapshot of the recording flag, so that a recording
       // started or stopped part way through this packet cannot leave the
       // sample count and the file contents disagreeing
-      final bool isRecording = ui.recording;
+      final bool isRecording = recorder.recording;
 
       // The loop condition tests `i + sampleBytes <= length`: the old
       // `i < length` entered the body whenever a single byte was left and
@@ -253,23 +248,12 @@ Future<void> notify() async {
           samplesWritten++;
         }
 
-        // Live HAR: pass every sample to the activity classifier, whether or
-        // not we are recording. addSample() returns null for most samples and
-        // a prediction only when a new window has been classified (every 25
-        // samples for the dummy model). `?? prediction` keeps an earlier
-        // prediction from this packet rather than overwriting it with null.
-        // If the model failed to load, harClassifier is null and this line
-        // does nothing.
-        prediction = harClassifier?.addSample(x, y, z) ?? prediction;
-        // The social signal model gets exactly the same samples. Its window is
-        // longer (10 s), so its first prediction comes later, then every step.
-        socialPrediction =
-            socialClassifier?.addSample(x, y, z) ?? socialPrediction;
+        // Every sample goes to the live session, which runs both classifiers
+        // (see live.dart), whether or not we are recording
+        samples.add([x, y, z]);
 
         seqNumInPacket++;
       }
-
-      ui.recorded_samples += samplesWritten;
 
       // write to the CSV file. All appends go through one open sink, so they
       // stay in order - reopening the file per packet let concurrent writes
@@ -282,34 +266,18 @@ Future<void> notify() async {
         }
       }
 
-      // Update the UI to show the latest data. This is done once per packet:
-      // calling setState for every sample rebuilt the whole page ~25 times
-      // per packet for no benefit.
-      String? accelText;
-      if (seqNumInPacket > 0) {
-        accelText =
-            "x=${x.toStringAsFixed(3)}, y=${y.toStringAsFixed(3)}, z=${z.toStringAsFixed(3)}";
-      }
+      recorder.addSamples(samplesWritten, packet_received_ts);
 
-      String battText = "";
-      if (respeckVersion == 6) {
-        if (charging) {
-          battText = "Battery: $battLevel% (charging)";
-        } else {
-          battText = "Battery: $battLevel%";
-        }
-      }
-
-      ui.updateFromPacket(
-        accelText: accelText,
-        battText: battText,
-        isRecording: isRecording,
-        packetReceivedTs: packet_received_ts,
-        // Only non-null when this packet produced a new prediction, so the
-        // display only changes when there is something new to show
-        prediction: prediction,
-        socialPrediction: socialPrediction,
+      // Hand the packet to the live session, which classifies the samples and
+      // updates every tab. This is done once per packet: notifying the UI for
+      // every sample would rebuild it ~25 times per packet for no benefit.
+      live.onPacket(
+        receivedAt: packet_received_ts,
+        seq: packetSeqNumber,
+        batteryLevel: battLevel,
+        isCharging: charging,
       );
+      live.ingest(samples, receivedAt: packet_received_ts);
     });
 
     // cleanup: cancel subscription when disconnected
@@ -346,6 +314,7 @@ Future<void> connectToRespeck() async {
     if (state == BluetoothConnectionState.connected) {
       print("CONNECTED to Respeck $respeckUUID");
       respeckConnected = true;
+      live.onConnected();
       showToast("Connected to Respeck $respeckUUID");
       try {
         await notify();
@@ -362,22 +331,20 @@ Future<void> connectToRespeck() async {
       print(
           "DISCONNECT: ${respeck?.disconnectReason?.code} ${respeck?.disconnectReason?.description}");
       respeckConnected = false;
-      // Empty the classifier's window, so that after a reconnect it waits
+      // Empty the classifiers' windows, so that after a reconnect they wait
       // for a full window of fresh samples instead of classifying a window
-      // that spans the gap in the data
-      harClassifier?.reset();
-      socialClassifier?.reset();
-      // Require a fresh packet before a new recording can be started
-      ui.received_packet = false;
+      // that spans the gap in the data. This also clears the last packet
+      // time, so a new recording needs a fresh packet first.
+      live.onDisconnected();
 
       // A disconnect in the middle of a recording used to leave `recording`
       // true and the CSV sink open. No further samples arrive, the elapsed
       // counter stays frozen at the value from the last packet and the file
       // is never closed, so the recording truncated without saying so. Close
       // it properly and tell the user instead.
-      final bool wasRecording = ui.recording;
+      final bool wasRecording = recorder.recording;
       if (wasRecording) {
-        await ui.stopRecording(
+        await recorder.stop(
             message: "Respeck disconnected - recording stopped");
       }
 

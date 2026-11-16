@@ -3,24 +3,47 @@
 // To perform an interaction with a widget in your test, use the WidgetTester
 // utility in the flutter_test package.
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:pdiot/main.dart';
 import 'package:pdiot/utils.dart';
+import 'package:flutter/material.dart';
 import 'package:pdiot/har.dart';
+import 'package:pdiot/app_settings.dart';
+import 'package:pdiot/history.dart';
+import 'package:pdiot/labels.dart';
+import 'package:pdiot/live.dart';
+import 'package:pdiot/replay.dart';
+import 'package:pdiot/settings.dart';
+import 'package:pdiot/trials.dart';
 
 void main() {
-  testWidgets('Home page shows the recording controls',
+  testWidgets('Shows the first-launch guide until it is completed',
       (WidgetTester tester) async {
-    // Build our app and trigger a frame.
+    appSettings.onboardingDone = false;
     await tester.pumpWidget(const MyApp());
+    expect(find.text('Welcome'), findsOneWidget);
+    expect(find.text('Next'), findsOneWidget);
+  });
 
-    expect(find.text('PDIoT'), findsOneWidget);
-    expect(find.text('Connect'), findsOneWidget);
-    expect(find.text('Start recording'), findsOneWidget);
-    expect(find.text('Stop recording'), findsOneWidget);
-    expect(find.text('Settings'), findsOneWidget);
-    expect(find.text('Not recording'), findsOneWidget);
+  testWidgets('Live tab invites the user to connect',
+      (WidgetTester tester) async {
+    appSettings.onboardingDone = true;
+    await tester.pumpWidget(const MyApp());
+    await tester.pump();
+
+    expect(find.text('Connect your RESpeck to start'), findsOneWidget);
+    expect(find.text('Not connected'), findsOneWidget);
+    // Bottom navigation
+    for (final tab in ['History', 'Test', 'Settings']) {
+      expect(find.text(tab), findsWidgets);
+    }
+
+    // Remove the app so the Live tab's one-second timer is cancelled
+    await tester.pumpWidget(const SizedBox());
   });
 
   group('sentenceToCamelCase', () {
@@ -77,6 +100,220 @@ void main() {
       w.clear();
       expect(w.add(0, 0, 0), false);
       expect(w.add(0, 0, 0), true);
+    });
+  });
+
+  group('majorityVote', () {
+    test('picks the most common label and averages its confidence', () {
+      final p = majorityVote(const [
+        HarPrediction('a', 0.6),
+        HarPrediction('b', 0.9),
+        HarPrediction('a', 0.8),
+      ]);
+      expect(p.label, 'a');
+      expect(p.confidence, closeTo(0.7, 1e-9));
+    });
+
+    test('breaks ties in favour of the newest prediction', () {
+      final p = majorityVote(const [
+        HarPrediction('a', 0.5),
+        HarPrediction('b', 0.5),
+      ]);
+      expect(p.label, 'b');
+    });
+  });
+
+  // History: time per activity, cough episodes and timeline segments
+  group('history summary', () {
+    final t0 = DateTime(2026, 11, 11, 10);
+    HistoryRecord rec(int s, ClassKind k, String label) =>
+        HistoryRecord(t0.add(Duration(seconds: s)), k, label, 0.9, 2, 'live');
+
+    test('counts a run of coughing predictions as one episode', () {
+      final social = [
+        rec(0, ClassKind.social, 'breathingNormally'),
+        rec(2, ClassKind.social, 'coughing'),
+        rec(4, ClassKind.social, 'coughing'),
+        rec(6, ClassKind.social, 'coughing'),
+        rec(8, ClassKind.social, 'breathingNormally'),
+        rec(10, ClassKind.social, 'coughing'),
+      ];
+      expect(countEpisodes(social, 'coughing'), 2);
+    });
+
+    test('a long gap splits an episode', () {
+      final social = [
+        rec(0, ClassKind.social, 'coughing'),
+        rec(60, ClassKind.social, 'coughing'),
+      ];
+      expect(countEpisodes(social, 'coughing'), 2);
+    });
+
+    test('adds up time per activity and splits active from still', () {
+      final s = summarise(dayOf(t0), [
+        rec(0, ClassKind.activity, 'sittingStanding'),
+        rec(2, ClassKind.activity, 'sittingStanding'),
+        rec(4, ClassKind.activity, 'normalWalking'),
+        rec(6, ClassKind.social, 'coughing'),
+      ]);
+      expect(s.activitySeconds['sittingStanding'], 4);
+      expect(s.activitySeconds['normalWalking'], 2);
+      expect(s.stationarySeconds, 4);
+      expect(s.activeSeconds, 2);
+      expect(s.coughEpisodes, 1);
+      expect(s.segments.map((x) => x.label),
+          ['sittingStanding', 'normalWalking']);
+    });
+
+    test('a record survives a round trip through CSV', () {
+      final r = rec(0, ClassKind.social, 'coughing');
+      final back = HistoryRecord.fromCsv(r.toCsv())!;
+      expect(back.time, r.time);
+      expect(back.kind, ClassKind.social);
+      expect(back.label, 'coughing');
+      expect(HistoryRecord.fromCsv('timestamp_ms,kind,label'), isNull);
+    });
+  });
+
+  group('accuracy trials', () {
+    test('only counted predictions are scored', () {
+      final trial =
+          Trial('A', 'running', DateTime(2026), 30, false, false, const [
+        // Inside the first window: logged, not counted
+        TrialPrediction(2, 'normalWalking', 0.6, 'normalWalking', 0.6, false),
+        TrialPrediction(4, 'running', 0.9, 'running', 0.9, true),
+        TrialPrediction(6, 'running', 0.9, 'running', 0.9, true),
+        TrialPrediction(8, 'normalWalking', 0.5, 'normalWalking', 0.5, true),
+      ]);
+      expect(trial.counted.length, 3);
+      expect(trial.correct, 2);
+      expect(trial.accuracy, closeTo(2 / 3, 1e-9));
+      expect(trial.majorityCorrect, isTrue);
+      expect(trial.timeToCorrectS, 4);
+    });
+
+    test('a trial survives a round trip through JSON', () {
+      final trial = Trial(
+          'B', 'coughing', DateTime(2026, 11, 11), 30, true, true, const [
+        TrialPrediction(10, 'coughing', 0.8, 'paused', 0, true),
+      ]);
+      final back = Trial.fromJson(trial.toJson());
+      expect(back.participant, 'B');
+      expect(back.fromReplay, isTrue);
+      expect(back.predictions.single.shown, 'paused');
+      expect(back.correct, 0);
+    });
+  });
+
+  group('replay', () {
+    test('parses accelerometer CSV and skips the header', () {
+      final s = parseAccelCsv('accelX,accelY,accelZ\n0.1,-0.9,0.2\n\n1,2,3\n');
+      expect(s, [
+        [0.1, -0.9, 0.2],
+        [1.0, 2.0, 3.0]
+      ]);
+    });
+  });
+
+  group('labels', () {
+    test('every model class has display information', () {
+      for (final id in [
+        'sittingStanding',
+        'lyingBack',
+        'lyingLeft',
+        'lyingRight',
+        'lyingStomach',
+        'normalWalking',
+        'shuffleWalking',
+        'ascending',
+        'descending',
+        'running',
+        'miscMovement',
+        'breathingNormally',
+        'coughing',
+        'hyperventilation',
+        'other'
+      ]) {
+        expect(classInfo(id).name, isNot(id), reason: id);
+      }
+    });
+
+    test('stationary activities match the static postures', () {
+      expect(stationaryActivities, {
+        for (final c in activityClasses)
+          if (c.stationary) c.id
+      });
+    });
+
+    test('durations are formatted compactly', () {
+      expect(formatDuration(const Duration(seconds: 45)), '45 s');
+      expect(formatDuration(const Duration(minutes: 12)), '12 min');
+      expect(
+          formatDuration(const Duration(hours: 2, minutes: 5)), '2 h 05 min');
+    });
+  });
+
+  group('faster updates', () {
+    test('halve the step of a classifier window', () {
+      final w = SampleWindow(50, 25);
+      w.step = (25 / 2).round();
+      expect(w.step, 13);
+    });
+  });
+
+  // The selectable models (see har.dart). A model missing from pubspec.yaml
+  // is not packaged and only fails on the phone, so check that here.
+  group('model selection', () {
+    test('an unknown or missing id falls back to the default model', () {
+      expect(findModel(socialModels, 'minirocket').name, 'MiniRocket');
+      expect(findModel(socialModels, 'removed'), socialModels.first);
+      expect(findModel(socialModels, null), socialModels.first);
+    });
+
+    test('model ids are unique for each task', () {
+      for (final options in [activityModels, socialModels]) {
+        final ids = options.map((m) => m.id).toList();
+        expect(ids.toSet().length, ids.length);
+      }
+    });
+
+    test('every model and metadata file exists and is bundled', () {
+      final pubspec = File('pubspec.yaml').readAsStringSync();
+      for (final m in [...activityModels, ...socialModels]) {
+        for (final asset in [m.modelAsset, m.metaAsset]) {
+          expect(File(asset).existsSync(), isTrue, reason: asset);
+          expect(pubspec.contains('- $asset'), isTrue,
+              reason: '$asset is not listed in pubspec.yaml');
+        }
+      }
+    });
+
+    testWidgets('Settings offers a choice of social signal model',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(const MaterialApp(home: SettingsPage()));
+      expect(find.text('Breathing & social model'), findsOneWidget);
+      // Only one activity model, so no choice is offered for it
+      expect(find.text('Activity model'), findsNothing);
+      // The dropdown lists every social model, the default selected
+      await tester.tap(find.text(socialModels.first.name));
+      await tester.pumpAndSettle();
+      for (final m in socialModels) {
+        expect(find.text(m.name), findsWidgets, reason: m.name);
+      }
+    });
+
+    test('metadata class names match the app labels', () {
+      for (final (options, labels) in [
+        (activityModels, activityClasses),
+        (socialModels, socialClasses),
+      ]) {
+        for (final m in options) {
+          final meta = jsonDecode(File(m.metaAsset).readAsStringSync());
+          expect(List<String>.from(meta['output']['classes']).toSet(),
+              {for (final c in labels) c.id},
+              reason: m.metaAsset);
+        }
+      }
     });
   });
 }

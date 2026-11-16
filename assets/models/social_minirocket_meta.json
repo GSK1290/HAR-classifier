@@ -1,0 +1,63 @@
+{
+  "model_file": "social_minirocket.tflite",
+  "task": "social_signal",
+  "sampling_frequency_hz": 12.5,
+  "window_samples": 125,
+  "step_samples": 25,
+  "input": {
+    "shape": [
+      1,
+      125,
+      3
+    ],
+    "channels": [
+      "accelX",
+      "accelY",
+      "accelZ"
+    ],
+    "units": "g (raw accelerometer values)",
+    "dtype": "float32"
+  },
+  "output": {
+    "shape": [
+      1,
+      4
+    ],
+    "classes": [
+      "breathingNormally",
+      "coughing",
+      "hyperventilation",
+      "other"
+    ],
+    "dtype": "float32"
+  },
+  "model_type": "minirocket",
+  "run_when": {
+    "activity_model_predicts_one_of": [
+      "sittingStanding",
+      "lyingBack",
+      "lyingLeft",
+      "lyingRight",
+      "lyingStomach"
+    ]
+  },
+  "backend": "tflite",
+  "normalization": "inside the model \u2013 feed raw values",
+  "quantized": false,
+  "trained_on_folds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "validation_fold": null,
+  "folds_file": "folds_social_signal.csv",
+  "model_family": "minirocket",
+  "best_epochs_or_rounds": 27
+}

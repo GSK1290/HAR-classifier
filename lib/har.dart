@@ -28,18 +28,51 @@ import 'package:tflite_flutter/tflite_flutter.dart';
 // Normalisation of the input is done inside the model itself, so raw values
 // in g are fed in exactly as they arrive from the respeck.
 
-// Paths of the model and its metadata inside the app bundle. These files must
-// also be listed under `assets:` in pubspec.yaml, otherwise they are not
-// packaged into the app and loading fails at startup.
-const String harModelAsset = 'assets/models/har_hybrid.tflite';
-const String harMetaAsset = 'assets/models/har_hybrid_meta.json';
+// One selectable model: a .tflite file and the metadata JSON describing it.
+// Both files must also be listed under `assets:` in pubspec.yaml, otherwise
+// they are not packaged into the app and loading fails.
+class ModelOption {
+  // Stable id stored in the settings, e.g. "minirocket". Never shown.
+  final String id;
+  // Name shown in Settings, e.g. "MiniRocket"
+  final String name;
+  final String modelAsset;
+  final String metaAsset;
+  const ModelOption(this.id, this.name, this.modelAsset, this.metaAsset);
+}
 
-// The social signal model (breathing normally / coughing / hyperventilation /
-// other). It uses the same input layout as the activity model, so it runs on
-// the same HarClassifier code, just with its own window (125 samples = 10 s)
-// and class names, both read from its metadata file.
-const String socialModelAsset = 'assets/models/social_hybrid.tflite';
-const String socialMetaAsset = 'assets/models/social_hybrid_meta.json';
+// The models the user can choose between, per task. The first entry of each
+// list is the default. To add a model, export it with the same contract
+// (input [1, window, 3] float32 raw g, output [1, classes] float32
+// probabilities, class names as in labels.dart), add its two files to
+// assets/models and pubspec.yaml, and add an entry here.
+//
+// A selector only appears in Settings for a task with more than one model.
+const List<ModelOption> activityModels = [
+  ModelOption('hybrid', 'Hybrid', 'assets/models/har_hybrid.tflite',
+      'assets/models/har_hybrid_meta.json'),
+];
+
+// The social signal models (breathing normally / coughing / hyperventilation
+// / other). They use the same input layout as the activity model, so they run
+// on the same HarClassifier code, just with their own window (125 samples =
+// 10 s) and class names, both read from their metadata files.
+const List<ModelOption> socialModels = [
+  ModelOption('hybrid', 'Hybrid', 'assets/models/social_hybrid.tflite',
+      'assets/models/social_hybrid_meta.json'),
+  ModelOption(
+      'minirocket',
+      'MiniRocket',
+      'assets/models/social_minirocket.tflite',
+      'assets/models/social_minirocket_meta.json'),
+  ModelOption('bilstm', 'CNN + BiLSTM', 'assets/models/social_bilstm.tflite',
+      'assets/models/social_bilstm_meta.json'),
+];
+
+// The model with the given id, or the default (first) one if the id is
+// unknown, e.g. a saved choice whose model has since been removed
+ModelOption findModel(List<ModelOption> options, String? id) =>
+    options.firstWhere((m) => m.id == id, orElse: () => options.first);
 
 // Activity classes during which the person is stationary. The social signal
 // data was all recorded while stationary, so its predictions are only shown
@@ -66,13 +99,20 @@ class SampleWindow {
   // Number of samples the model looks at in one go (50 for the dummy model)
   final int length;
   // Number of new samples between two classifications (25 for the dummy model)
-  final int step;
+  // Not final: the "faster updates" setting halves it at run time. The step
+  // only controls how often the model runs, not what it sees, so changing it
+  // needs no retraining.
+  int step;
   // The buffered samples, oldest first. Each entry is [x, y, z] in g.
   final List<List<double>> _samples = [];
   // Samples added since the last time a window was reported ready
   int _sinceLast = 0;
 
   SampleWindow(this.length, this.step);
+
+  // Number of samples currently buffered (at most `length`). Used to show how
+  // far the first window has filled before the first prediction.
+  int get count => _samples.length;
 
   // Add one sample. Returns true when a new window is ready to classify,
   // in which case the caller should read `batch` straight away.
@@ -122,6 +162,8 @@ class HarPrediction {
 // Wraps the TFLite interpreter together with the sliding window. Feed it
 // samples one at a time with addSample(); it decides when to run the model.
 class HarClassifier {
+  // Which model this is (name and asset paths)
+  final ModelOption model;
   // The TFLite interpreter that holds the loaded model and runs inference
   final Interpreter _interpreter;
   // Activity names, in the same order as the model's output probabilities
@@ -131,29 +173,69 @@ class HarClassifier {
 
   // Private constructor: a HarClassifier can only be made through load(),
   // because loading the model and metadata is asynchronous
-  HarClassifier._(this._interpreter, this.classes, this.window);
+  // The step given in the metadata file, before any "faster updates" change
+  final int defaultStep;
+
+  // How long the most recent call to the model took, in milliseconds. Shown
+  // on the Test tab's performance panel.
+  double lastInferenceMs = 0;
+
+  HarClassifier._(this.model, this._interpreter, this.classes, this.window)
+      : defaultStep = window.step;
+
+  // The RESpeck streams accelerometer samples at 12.5 Hz
+  static const double sampleRateHz = 12.5;
+
+  // Seconds of data in one window (4 s activity, 10 s social)
+  double get windowSeconds => window.length / sampleRateHz;
+
+  // Seconds between two predictions (2 s, or 1 s with faster updates)
+  double get stepSeconds => window.step / sampleRateHz;
+
+  // How full the window is, from 0 to 1. Reaches 1 at the first prediction.
+  double get warmup => window.count / window.length;
+
+  // Faster updates run the model twice as often (every 1 s instead of 2 s)
+  void setFastUpdates(bool fast) {
+    window.step = fast ? (defaultStep / 2).round() : defaultStep;
+  }
 
   // Load the metadata and the model from the app's assets. Throws if either
-  // file is missing or invalid, which main() catches so that the app still
-  // starts (just without live HAR).
-  // By default this loads the activity model; pass the social signal paths
-  // to load that model instead.
-  static Future<HarClassifier> load({
-    String modelAsset = harModelAsset,
-    String metaAsset = harMetaAsset,
-  }) async {
+  // file is missing or invalid, or if the model does not match its metadata.
+  // Callers catch this, so that the app still starts (just without that
+  // classifier) and a failed model switch keeps the previous model.
+  static Future<HarClassifier> load(ModelOption model) async {
     // The metadata JSON describes the model: the class names, the window
     // length and the step between windows (see har_hybrid_meta.json)
-    final meta = jsonDecode(await rootBundle.loadString(metaAsset));
+    final meta = jsonDecode(await rootBundle.loadString(model.metaAsset));
     final classes = List<String>.from(meta['output']['classes']);
+    final int windowSamples = meta['window_samples'];
     // Load the .tflite model into an interpreter, ready to run
-    final interpreter = await Interpreter.fromAsset(modelAsset);
+    final interpreter = await Interpreter.fromAsset(model.modelAsset);
+    // Nothing else checks that the metadata describes this .tflite file, and
+    // a mismatch (e.g. a channels-first [1, 3, 125] export) would otherwise
+    // only show up as an error, or as silently wrong results, at the first
+    // window. Refuse such a model straight away instead.
+    final inShape = interpreter.getInputTensor(0).shape;
+    final outShape = interpreter.getOutputTensor(0).shape;
+    if (inShape.join(',') != '1,$windowSamples,3' ||
+        outShape.join(',') != '1,${classes.length}') {
+      interpreter.close();
+      throw StateError('${model.modelAsset}: model shapes $inShape -> '
+          '$outShape do not match the metadata '
+          '[1, $windowSamples, 3] -> [1, ${classes.length}]');
+    }
     return HarClassifier._(
+      model,
       interpreter,
       classes,
-      SampleWindow(meta['window_samples'], meta['step_samples']),
+      SampleWindow(windowSamples, meta['step_samples']),
     );
   }
+
+  // Free the interpreter. Called on the old classifier after switching to a
+  // different model; the classifier must not be used afterwards.
+  void close() => _interpreter.close();
 
   // Add one sample (in g). Returns a prediction when this sample completed a
   // new window and the model was run, otherwise null. Most calls return null:
@@ -169,7 +251,9 @@ class HarClassifier {
     // isolate, which is fine for a model as small as the dummy one, but a much
     // bigger model may need to run in a background isolate to keep the UI
     // smooth.
+    final timer = Stopwatch()..start();
     _interpreter.run(window.batch, output);
+    lastInferenceMs = timer.elapsedMicroseconds / 1000.0;
     final probs = output[0];
     // Pick the class with the highest probability (argmax)
     int best = 0;
@@ -186,7 +270,7 @@ class HarClassifier {
 }
 
 // The single classifier used by the app, shared by main.dart (which loads it),
-// ble.dart (which feeds it samples) and home.dart (which checks it exists).
+// ble.dart (which feeds it samples) and the Live tab (which checks it exists).
 // Null until main() has loaded the model, and stays null if loading failed,
 // in which case the app works as before without live HAR.
 HarClassifier? harClassifier;
